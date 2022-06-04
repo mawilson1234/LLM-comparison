@@ -1,0 +1,7 @@
+string_id: bert-base-uncased
+
+model_kwargs:
+  local_files_only: true
+tokenizer_kwargs:
+  do_basic_tokenize: false
+  local_files_only: true

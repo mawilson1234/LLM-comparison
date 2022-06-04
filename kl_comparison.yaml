@@ -1,0 +1,20 @@
+defaults:
+  - _self_
+
+dataset_loc: dataset_maker/datasets/miniboki-2022-04-01_22-58-30/miniboki
+split: test
+data_field: text
+n_examples: none
+
+kl_masking: none
+size_average: none
+reduce: none
+reduction: batchmean
+device: cpu
+  
+hydra:
+  run: 
+    dir: outputs/${now:%Y-%m-%d_%H-%M-%S.%f}
+  sweep:
+    dir: outputs
+    subdir: ${now:%Y-%m-%d_%H-%M-%S.%f}-${n}

@@ -1,5 +1,6 @@
 # Compares all pairs of models defined in ./models/ on a given dataset
 import os
+import re
 import hydra
 import logging
 
@@ -466,6 +467,8 @@ def main(cfg: DictConfig):
 	
 	configs = sorted([os.path.join(hydra.utils.get_original_cwd(), 'models', f) for f in os.listdir(os.path.join(hydra.utils.get_original_cwd(), 'models'))])
 	paired = list(permutations(configs,2))
+	paired = [pair for pair in paired if not pair[0].endswith('k.yaml')]
+	paired = [pair for pair in paired if not pair[1].endswith('k.yaml') or re.sub(r'-(.*)k\.yaml', '.yaml', os.path.split(pair[1])[1]) == os.path.split(pair[0])[1]]
 	results = []
 	
 	for f1, f2 in paired:
@@ -516,10 +519,12 @@ def main(cfg: DictConfig):
 		) for sentence, kl_div, mask_indices in zip(dataset[cfg.data_field], kl_divs, all_mask_indices)]
 		
 		results.extend(pair_results)
-		breakpoint()
 	
 	results = pd.DataFrame(results).assign(run_id=os.path.split(os.getcwd())[1])
 	results.to_csv('results.csv.gz', index=False, na_rep='NaN')
+	
+	summary = results.groupby(['p_model', 'q_model']).agg(mean_kl_div = ('kl_div', 'mean'), sem_kl_div = ('kl_div', 'sem')).reset_index()
+	summary.to_csv('summary.csv.gz', index=False)
 		
 if __name__ == '__main__':
 	

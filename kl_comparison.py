@@ -10,9 +10,11 @@ import torch
 import torch.nn.functional as F
 from torch.nn.modules.loss import KLDivLoss
 
+from math import sqrt
 from tqdm import tqdm
+from copy import deepcopy
 from typing import *
-from omegaconf import OmegaConf, DictConfig
+from omegaconf import OmegaConf, DictConfig, ListConfig
 from itertools import permutations
 
 from transformers import AutoModelForMaskedLM, AutoTokenizer
@@ -364,7 +366,7 @@ class KLDivergenceComparison(KLDivLoss):
 				reduction							: passed to KLDivLoss
 				device (str)						: what device to put the models on
 		'''
-		super(KLBaselineLoss, self).__init__(size_average, reduce, reduction)
+		super(KLDivergenceComparison, self).__init__(size_average, reduce, reduction)
 		
 		self.device 		= device if torch.cuda.is_available() else 'cpu'
 		self.masking 		= masking
@@ -402,20 +404,14 @@ class KLDivergenceComparison(KLDivLoss):
 		and the predictions of the fine-tuned model on the basis of self.n_examples
 		from self.dataset. Samples are randomized with each call.
 		
-			params:
-				progress_bar (bool)		: whether to display a progress bar while iterating through
-										  the chosen examples
-				return_all (bool)		: whether to return a list containing every individual KL divergence
-										  in a list in addition to the mean
-			
 			returns:
-				kl_div (torch.Tensor)	: the mean KL divergence between the model and the baseline model
-										  across n_examples of the dataset, multiplied by the scaling factor
+				mean_kl_div (torch.Tensor)	: the mean KL divergence between p model and q model
+										  across n_examples of the dataset
 				kl_divs (torch.Tensor)	: the individual KL divergence for each example
-										  returned if return_all=True.
+				all_mask_indices (torch.Tensor): the mask indices that were chosen for each example
 		'''
 		# construct a comparison dataset for this call with n random examples
-		comp_dataset 		= sample_from_dataset(self.dataset, self.n_examples, log_message=progress_bar)
+		comp_dataset 		= sample_from_dataset(self.dataset, self.n_examples)
 		dataloader 			= tqdm(torch.utils.data.DataLoader(comp_dataset, batch_size=1))
 		mean_kl_div			= torch.tensor((0.)).to(self.device)
 		kl_divs 			= []
@@ -437,29 +433,38 @@ class KLDivergenceComparison(KLDivLoss):
 					
 					mask_indices.append(mask_input_indices)
 				
-				if return_all:
-					all_mask_indices.append(mask_indices)
+				all_mask_indices.extend(mask_indices)
 				
-				outputs 		= self.q_model(**batch_inputs).logits
+				if 'distilbert' not in self.q_model.name_or_path:
+					outputs 	= self.q_model(**batch_inputs).logits
+				else:
+					outputs 	= self.q_model(**{k: v for k, v in batch_inputs.items() if not k == 'token_type_ids'}).logits
+				
 				outputs 		= F.log_softmax(outputs, dim=-1)
-				p_outputs 		= F.softmax(self.p_model(**batch_inputs).logits, dim=-1)	
+				
+				if 'distilbert' not in self.p_model.name_or_path:
+					p_outputs 	= F.softmax(self.p_model(**batch_inputs).logits, dim=-1)
+				else:
+					p_outputs 	= F.softmax(self.p_model(**{k: v for k, v in batch_inputs.items() if not k == 'token_type_ids'}).logits, dim=-1)
 								
 				# we just calculate the loss on the selected tokens
 				outputs 		= torch.cat([torch.unsqueeze(outputs[i].index_select(0, mask_locations), dim=0) for i, mask_locations in enumerate(mask_indices)], dim=0)
 				p_outputs		= torch.cat([torch.unsqueeze(p_outputs[i].index_select(0, mask_locations), dim=0) for i, mask_locations in enumerate(mask_indices)], dim=0)
 				
 				# we want this to be a mean instead of a sum, so divide by the length of the dataset
-				kl_div 			= super(KLBaselineLoss, self).forward(outputs, p_outputs)
+				kl_div 			= super(KLDivergenceComparison, self).forward(outputs, p_outputs)
 				mean_kl_div 	+= kl_div/comp_dataset.num_rows
 				
 				kl_divs.append(kl_div.cpu())
 				dataloader.set_postfix(kl_div_mean=f'{np.mean(kl_divs):.2f}', kl_div_se=f'{sem(kl_divs):.2f}')
 		
-		return torch.tensor(kl_divs).to(self.device), all_mask_indices
+		return mean_kl_div, torch.tensor(kl_divs).to(self.device), all_mask_indices
 
 @hydra.main(config_path='.', config_name='kl_comparison')
 def main(cfg: DictConfig):
-	configs = os.listdir('model')
+	print(OmegaConf.to_yaml(cfg))
+	
+	configs = sorted([os.path.join(hydra.utils.get_original_cwd(), 'models', f) for f in os.listdir(os.path.join(hydra.utils.get_original_cwd(), 'models'))])
 	paired = list(permutations(configs,2))
 	results = []
 	
@@ -468,36 +473,37 @@ def main(cfg: DictConfig):
 		c2 = OmegaConf.load(f2)
 	
 		dataset = load_format_dataset(
-					dataset_loc=cfg.dataset_loc, 
-					split=cfg.split, 
-					data_field=cfg.data_field, 
-					string_id=c1.string_id, 
-					n_examples=cfg.n_examples if not str(cfg.n_examples.lower()) == 'none' else None, 
-					tokenizer_kwargs=c1.tokenizer_kwargs,
-				)
-	
+			dataset_loc=os.path.join(hydra.utils.get_original_cwd(), cfg.dataset_loc),
+			split=cfg.split, 
+			data_field=cfg.data_field, 
+			string_id=c1.string_id, 
+			n_examples=cfg.n_examples if not str(cfg.n_examples).lower() == 'none' else None, 
+			tokenizer_kwargs=c1.tokenizer_kwargs,
+		)
+		
 		kl_comp = KLDivergenceComparison(
 			p_model=c1.string_id, 
 			q_model=c2.string_id,
 			dataset=dataset,
-			n_examples=cfg.n_examples if not str(cfg.n_examples.lower()) == 'none' else None,
+			n_examples=cfg.n_examples if not str(cfg.n_examples).lower() == 'none' else None,
 			masking=cfg.kl_masking,
 			p_model_kwargs=c1.model_kwargs,
 			q_model_kwargs=c2.model_kwargs,
 			p_tokenizer_kwargs=c1.tokenizer_kwargs,
 			q_tokenizer_kwargs=c2.tokenizer_kwargs,
-			size_average=cfg.size_average if not cfg.size_average.lower() == 'none' else None,
-			reduce=cfg.reduce if not cfg.reduce.lower() == 'none' else None,
+			size_average=cfg.size_average if not str(cfg.size_average).lower() == 'none' else None,
+			reduce=cfg.reduce if not str(cfg.reduce).lower() == 'none' else None,
 			reduction=cfg.reduction,
 			device=cfg.device if torch.cuda.is_available() else 'cpu'		
 		)
 		
+		log.info(f'Computing D_KL({c1.string_id}||{c2.string_id}) for {cfg.n_examples if not str(cfg.n_examples).lower() == "none" else "all"} examples from {cfg.dataset_loc}')
 		_, kl_divs, all_mask_indices = kl_comp.compute()
 		
 		pair_results = [dict(
 			sentence=sentence,
-			kl_div=kl_div,
-			mask_indices=mask_indices,
+			kl_div=float(kl_div),
+			target_indices=[int(i) for i in mask_indices],
 			p_model=c1.string_id,
 			q_model=c2.string_id,
 			dataset=cfg.dataset_loc,
@@ -510,6 +516,7 @@ def main(cfg: DictConfig):
 		) for sentence, kl_div, mask_indices in zip(dataset[cfg.data_field], kl_divs, all_mask_indices)]
 		
 		results.extend(pair_results)
+		breakpoint()
 	
 	results = pd.DataFrame(results).assign(run_id=os.path.split(os.getcwd())[1])
 	results.to_csv('results.csv.gz', index=False, na_rep='NaN')

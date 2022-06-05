@@ -463,69 +463,70 @@ class KLDivergenceComparison(KLDivLoss):
 
 @hydra.main(config_path='.', config_name='kl_comparison')
 def main(cfg: DictConfig):
+	'''
+	Compares two models on KL divergence based on config settings.
+	
+		params:
+			cfg (DictConfig): a DictConfig specifying parameters for the run
+							  see kl_comparison.yaml for details.
+	'''
 	print(OmegaConf.to_yaml(cfg))
 	
-	configs = sorted([os.path.join(hydra.utils.get_original_cwd(), 'models', f) for f in os.listdir(os.path.join(hydra.utils.get_original_cwd(), 'models'))])
-	paired = list(permutations(configs,2))
-	paired = [pair for pair in paired if not pair[0].endswith('k.yaml')]
-	paired = [pair for pair in paired if not pair[1].endswith('k.yaml') or re.sub(r'-(.*)k\.yaml', '.yaml', os.path.split(pair[1])[1]) == os.path.split(pair[0])[1]]
-	results = []
+	p = OmegaConf.load(os.path.join(hydra.utils.get_original_cwd(), 'models', f'{cfg.p_model}.yaml'))
+	q = OmegaConf.load(os.path.join(hydra.utils.get_original_cwd(), 'models', f'{cfg.q_model}.yaml'))
 	
-	for f1, f2 in paired:
-		c1 = OmegaConf.load(f1)
-		c2 = OmegaConf.load(f2)
+	dataset = load_format_dataset(
+		dataset_loc=os.path.join(hydra.utils.get_original_cwd(), cfg.dataset_loc),
+		split=cfg.split, 
+		data_field=cfg.data_field, 
+		string_id=p.string_id, 
+		n_examples=cfg.n_examples if not str(cfg.n_examples).lower() == 'none' else None, 
+		tokenizer_kwargs=p.tokenizer_kwargs,
+	)
 	
-		dataset = load_format_dataset(
-			dataset_loc=os.path.join(hydra.utils.get_original_cwd(), cfg.dataset_loc),
-			split=cfg.split, 
-			data_field=cfg.data_field, 
-			string_id=c1.string_id, 
-			n_examples=cfg.n_examples if not str(cfg.n_examples).lower() == 'none' else None, 
-			tokenizer_kwargs=c1.tokenizer_kwargs,
-		)
-		
-		kl_comp = KLDivergenceComparison(
-			p_model=c1.string_id, 
-			q_model=c2.string_id,
-			dataset=dataset,
-			n_examples=cfg.n_examples if not str(cfg.n_examples).lower() == 'none' else None,
-			masking=cfg.kl_masking,
-			p_model_kwargs=c1.model_kwargs,
-			q_model_kwargs=c2.model_kwargs,
-			p_tokenizer_kwargs=c1.tokenizer_kwargs,
-			q_tokenizer_kwargs=c2.tokenizer_kwargs,
-			size_average=cfg.size_average if not str(cfg.size_average).lower() == 'none' else None,
-			reduce=cfg.reduce if not str(cfg.reduce).lower() == 'none' else None,
-			reduction=cfg.reduction,
-			device=cfg.device if torch.cuda.is_available() else 'cpu'		
-		)
-		
-		log.info(f'Computing D_KL({c1.string_id}||{c2.string_id}) for {cfg.n_examples if not str(cfg.n_examples).lower() == "none" else "all"} examples from {cfg.dataset_loc}')
-		_, kl_divs, all_mask_indices = kl_comp.compute()
-		
-		pair_results = [dict(
-			sentence=sentence,
-			kl_div=float(kl_div),
-			target_indices=[int(i) for i in mask_indices],
-			p_model=c1.string_id,
-			q_model=c2.string_id,
-			dataset=cfg.dataset_loc,
-			split=cfg.split,
-			n_examples=cfg.n_examples,
-			kl_masking=cfg.kl_masking,
-			size_average=cfg.size_average,
-			reduce=cfg.reduce,
-			reduction=cfg.reduction,
-		) for sentence, kl_div, mask_indices in zip(dataset[cfg.data_field], kl_divs, all_mask_indices)]
-		
-		results.extend(pair_results)
+	kl_comp = KLDivergenceComparison(
+		p_model=p.string_id, 
+		q_model=q.string_id,
+		dataset=dataset,
+		n_examples=cfg.n_examples if not str(cfg.n_examples).lower() == 'none' else None,
+		masking=cfg.kl_masking,
+		p_model_kwargs=p.model_kwargs,
+		q_model_kwargs=q.model_kwargs,
+		p_tokenizer_kwargs=p.tokenizer_kwargs,
+		q_tokenizer_kwargs=q.tokenizer_kwargs,
+		size_average=cfg.size_average if not str(cfg.size_average).lower() == 'none' else None,
+		reduce=cfg.reduce if not str(cfg.reduce).lower() == 'none' else None,
+		reduction=cfg.reduction,
+		device=cfg.device if torch.cuda.is_available() else 'cpu'		
+	)
 	
-	results = pd.DataFrame(results).assign(run_id=os.path.split(os.getcwd())[1])
+	log.info(f'Computing D_KL({p.string_id}||{q.string_id}) for {cfg.n_examples if not str(cfg.n_examples).lower() == "none" else "all"} examples from {cfg.dataset_loc}')
+	_, kl_divs, all_mask_indices = kl_comp.compute()
+	
+	results = pd.DataFrame([dict(
+		sentence=sentence,
+		kl_div=float(kl_div),
+		target_indices=[int(i) for i in mask_indices],
+		p_model=p.string_id,
+		q_model=q.string_id,
+		dataset=cfg.dataset_loc,
+		split=cfg.split,
+		n_examples=cfg.n_examples,
+		kl_masking=cfg.kl_masking,
+		size_average=cfg.size_average,
+		reduce=cfg.reduce,
+		reduction=cfg.reduction,
+		run_id=os.path.split(os.getcwd())[1]
+	) for sentence, kl_div, mask_indices in zip(dataset[cfg.data_field], kl_divs, all_mask_indices)])
+	
 	results.to_csv('results.csv.gz', index=False, na_rep='NaN')
 	
-	summary = results.groupby(['p_model', 'q_model']).agg(mean_kl_div = ('kl_div', 'mean'), sem_kl_div = ('kl_div', 'sem')).reset_index()
+	summary = results.groupby(['p_model', 'q_model']) \
+		.agg(mean_kl_div = ('kl_div', 'mean'), sem_kl_div = ('kl_div', 'sem')) \
+		.reset_index()
+	
 	summary.to_csv('summary.csv.gz', index=False)
-		
+
 if __name__ == '__main__':
 	
 	main()

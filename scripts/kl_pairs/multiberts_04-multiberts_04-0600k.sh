@@ -4,7 +4,7 @@
 #SBATCH --output=joblogs/%x_%j.txt
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=30GB
+#SBATCH --mem=16GB
 #SBATCH --time=48:00:00
 #SBATCH --gpus=v100:1
 #SBATCH --partition=gpu
@@ -16,4 +16,4 @@ module load miniconda
 
 source activate kl-divergence
 
-python kl_comparison.py
+python kl_comparison.py p_model=multiberts_04 q_model=multiberts_04-0600k

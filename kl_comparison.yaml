@@ -1,6 +1,9 @@
 defaults:
   - _self_
 
+p_model: bert
+q_model: distilbert
+
 dataset_loc: dataset_maker/datasets/miniboki-2022-04-01_22-58-30/miniboki
 split: test
 data_field: text
@@ -11,10 +14,10 @@ size_average: none
 reduce: none
 reduction: batchmean
 device: cpu
-  
+
 hydra:
   run: 
-    dir: outputs/${now:%Y-%m-%d_%H-%M-%S.%f}
+    dir: outputs/${p_model}-${q_model}/${now:%Y-%m-%d_%H-%M-%S.%f}
   sweep:
     dir: outputs
-    subdir: ${now:%Y-%m-%d_%H-%M-%S.%f}-${n}
+    subdir: /${p_model}-${q_model}/${now:%Y-%m-%d_%H-%M-%S.%f}

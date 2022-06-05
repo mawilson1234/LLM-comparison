@@ -521,9 +521,14 @@ def main(cfg: DictConfig):
 	
 	results.to_csv('results.csv.gz', index=False, na_rep='NaN')
 	
-	summary = results.groupby(['p_model', 'q_model']) \
+	summary = results.groupby([c for c in results.columns if not c in ['kl_div', 'sentence', 'target_indices']]) \
 		.agg(mean_kl_div = ('kl_div', 'mean'), sem_kl_div = ('kl_div', 'sem')) \
 		.reset_index()
+	
+	summary = summary[
+		['run_id', 'p_model', 'q_model', 'mean_kl_div', 'sem_kl_div'] + 
+		[c for c in summary.columns if not c in ['run_id', 'p_model', 'q_model', 'mean_kl_div', 'sem_kl_div']]
+	]
 	
 	summary.to_csv('summary.csv.gz', index=False)
 

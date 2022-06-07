@@ -52,7 +52,7 @@ def generate_scripts(d: str = '.') -> None:
 	
 	for p_model, q_model in pairs:
 		file = header + (
-			f'\npython kl_comparison.py p_model={p_model} q_model={q_model}'
+			f'\npython kl_comparison.py p_model={p_model} q_model={q_model} batch_size=32'
 		)
 		
 		with open(os.path.join(d, f'{p_model}-{q_model}.sh'), 'wt') as out_file:

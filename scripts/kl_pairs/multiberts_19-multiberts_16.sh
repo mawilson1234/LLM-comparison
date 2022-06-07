@@ -16,4 +16,4 @@ module load miniconda
 
 source activate kl-divergence
 
-python kl_comparison.py p_model=multiberts_19 q_model=multiberts_16
+python kl_comparison.py p_model=multiberts_19 q_model=multiberts_16 batch_size=32

@@ -1,4 +1,4 @@
-# Compares all pairs of models defined in ./models/ on a given dataset
+# Compares pairs of models defined in on a given dataset
 import os
 import re
 import hydra
@@ -187,7 +187,7 @@ def load_format_dataset(
 	# now cast back to a dataset
 	dataset 				= Dataset.from_dict(dataset)
 	dataset 				= sample_from_dataset(dataset, n_examples)
-	dataset 				= dataset.map(lambda ex: baseline_tokenizer(ex[data_field]))
+	dataset 				= dataset.map(lambda ex: baseline_tokenizer(ex[data_field]), batched=True)
 	
 	dataset.set_format(type='torch', columns=[f for f in dataset.features if not f in original_cols])
 	
@@ -317,6 +317,32 @@ def sem(x: Union[List,np.ndarray,torch.Tensor]) -> float:
 	namespace = torch if isinstance(x,torch.Tensor) else np
 	return namespace.std(x)/sqrt(len(x))
 
+def pad_tensor(t: torch.Tensor, pad: int, dim: int = -1) -> torch.Tensor:
+	'''
+	Pads a tensor to length pad in dim dim.
+	From https://discuss.pytorch.org/t/dataloader-for-various-length-of-data/6418/8?u=mawilson
+	
+		params:
+			t (torch.Tensor): tensor to pad
+			pad (int)		: the size to pad to
+			dim (int)		: dimension to pad
+		
+		returns:
+			a new torch.Tensor padded to 'pad' in dimension 'dim'
+	'''
+	pad_size = list(t.shape)
+	pad_size[dim] = pad - t.size(dim)
+	return torch.cat([t, torch.zeros(*pad_size, dtype=t.dtype)], dim=dim)
+
+def pad_batch(batch: Tuple) -> Tuple:
+	'''
+	Pads examples in a batch to the same length.
+	'''
+	max_len = max(map(lambda ex: ex['input_ids'].size(-1), batch))
+	batch 	= list(map(lambda ex: {k: pad_tensor(ex[k], pad=max_len, dim=-1) for k in ex}, batch))
+	batch 	= {k: torch.stack([ex[k] for ex in batch], dim=0) for k in batch[0].keys()}
+	return batch
+
 class KLDivergenceComparison(KLDivLoss):
 	'''
 	Gets the KL divergence between the predictions of two models. Higher KL divergences
@@ -329,7 +355,7 @@ class KLDivergenceComparison(KLDivLoss):
 		p_model: 'PreTrainedModel',
 		q_model: 'PreTrainedModel',
 		dataset: Dataset,
-		n_examples: int = None,
+		batch_size: int = 1,
 		masking: str = 'none',
 		p_model_kwargs: Dict = None,
 		q_model_kwargs: Dict = None,
@@ -350,11 +376,7 @@ class KLDivergenceComparison(KLDivLoss):
 				dataset (Dataset)					: a dataset in huggingface's datasets format that
 													  has been pretokenized for use with the same kind of tokenizer
 													  as passed
-				n_examples_per_step (int)			: it may be too time-consuming to calculate the KLBaselineLoss on
-													  the basis of the entire dataset, if the dataset is large.
-													  you can use this to set how many random samples to draw
-													  from dataset to use when calculating loss. If not set,
-													  all examples will be used each time.
+				batch_size (int)					: the batch size (while the models will be run on full batches, KL divergence is still calculated per example, so it can be recorded per sentence)
 				masking (str)						: which style of masking to use when calculating the loss
 													  valid options are the following.
 													  "always": choose 15% of tokens to randomly mask per sentence, and replace with mask tokens
@@ -395,9 +417,7 @@ class KLDivergenceComparison(KLDivLoss):
 		_ = self.q_model.eval()
 		
 		self.dataset 		= dataset
-		
-		# can't use more examples than we've got
-		self.n_examples 	= self.dataset.num_rows if n_examples is None else min(n_examples, self.dataset.num_rows)		
+		self.dataloader 	= tqdm(torch.utils.data.DataLoader(self.dataset, batch_size=batch_size, collate_fn=pad_batch))
 	
 	def compute(self) -> Tuple[torch.Tensor]:
 		'''
@@ -411,15 +431,12 @@ class KLDivergenceComparison(KLDivLoss):
 				kl_divs (torch.Tensor)	: the individual KL divergence for each example
 				all_mask_indices (torch.Tensor): the mask indices that were chosen for each example
 		'''
-		# construct a comparison dataset for this call with n random examples
-		comp_dataset 		= sample_from_dataset(self.dataset, self.n_examples)
-		dataloader 			= tqdm(torch.utils.data.DataLoader(comp_dataset, batch_size=1))
 		mean_kl_div			= torch.tensor((0.)).to(self.device)
 		kl_divs 			= []
 		all_mask_indices	= []
 		
 		with torch.no_grad():
-			for i, batch in enumerate(dataloader):
+			for i, batch in enumerate(self.dataloader):
 				batch_inputs	= {k: v.to(self.device) for k, v in batch.items() if isinstance(v,torch.Tensor)}
 				
 				mask_indices	= []
@@ -437,27 +454,29 @@ class KLDivergenceComparison(KLDivLoss):
 				all_mask_indices.extend(mask_indices)
 				
 				if 'distilbert' not in self.q_model.name_or_path:
-					outputs 	= self.q_model(**batch_inputs).logits
+					q_outputs 	= self.q_model(**batch_inputs).logits
 				else:
-					outputs 	= self.q_model(**{k: v for k, v in batch_inputs.items() if not k == 'token_type_ids'}).logits
-				
-				outputs 		= F.log_softmax(outputs, dim=-1)
+					q_outputs 	= self.q_model(**{k: v for k, v in batch_inputs.items() if not k == 'token_type_ids'}).logits
 				
 				if 'distilbert' not in self.p_model.name_or_path:
-					p_outputs 	= F.softmax(self.p_model(**batch_inputs).logits, dim=-1)
+					p_outputs 	= self.p_model(**batch_inputs).logits
 				else:
-					p_outputs 	= F.softmax(self.p_model(**{k: v for k, v in batch_inputs.items() if not k == 'token_type_ids'}).logits, dim=-1)
-								
-				# we just calculate the loss on the selected tokens
-				outputs 		= torch.cat([torch.unsqueeze(outputs[i].index_select(0, mask_locations), dim=0) for i, mask_locations in enumerate(mask_indices)], dim=0)
-				p_outputs		= torch.cat([torch.unsqueeze(p_outputs[i].index_select(0, mask_locations), dim=0) for i, mask_locations in enumerate(mask_indices)], dim=0)
+					p_outputs 	= self.p_model(**{k: v for k, v in batch_inputs.items() if not k == 'token_type_ids'}).logits
 				
-				# we want this to be a mean instead of a sum, so divide by the length of the dataset
-				kl_div 			= super(KLDivergenceComparison, self).forward(outputs, p_outputs)
-				mean_kl_div 	+= kl_div/comp_dataset.num_rows
+				# we calculate D_KL for each example individually because we'd like to record the D_KL per sentence for inspection later
+				# doing it per batch would just give us a mean rather than the sum
+				for q_output, p_output, ex_mask_indices in zip(q_outputs, p_outputs, mask_indices):
+					# we just calculate the D_KL on the selected tokens (pad tokens are excluded in the mask indices returned by mask input, so we don't have to manually exclude those here)
+					q_output 		= torch.unsqueeze(F.log_softmax(torch.cat([q_output.index_select(0, mask_locations) for i, mask_locations in enumerate(ex_mask_indices)], dim=0), dim=-1), dim=0)
+					p_output		= torch.unsqueeze(F.softmax(torch.cat([p_output.index_select(0, mask_locations) for i, mask_locations in enumerate(ex_mask_indices)], dim=0), dim=-1), dim=0)
+					
+					# we want this to be a mean instead of a sum, so divide by the length of the dataset
+					kl_div 			= super(KLDivergenceComparison, self).forward(q_output, p_output)
+					mean_kl_div 	+= kl_div/self.dataset.num_rows
+					
+					kl_divs.append(kl_div.cpu())
 				
-				kl_divs.append(kl_div.cpu())
-				dataloader.set_postfix(kl_div_mean=f'{np.mean(kl_divs):.2f}', kl_div_se=f'{sem(kl_divs):.2f}')
+				self.dataloader.set_postfix(kl_div_mean=f'{np.mean(kl_divs):.2f}', kl_div_se=f'{sem(kl_divs):.2f}')
 		
 		return mean_kl_div, torch.tensor(kl_divs).to(self.device), all_mask_indices
 
@@ -488,7 +507,7 @@ def main(cfg: DictConfig):
 		p_model=p.string_id, 
 		q_model=q.string_id,
 		dataset=dataset,
-		n_examples=cfg.n_examples if not str(cfg.n_examples).lower() == 'none' else None,
+		batch_size=cfg.batch_size,
 		masking=cfg.kl_masking,
 		p_model_kwargs=p.model_kwargs,
 		q_model_kwargs=q.model_kwargs,
@@ -519,9 +538,13 @@ def main(cfg: DictConfig):
 		run_id=os.path.split(os.getcwd())[1]
 	) for sentence, kl_div, mask_indices in zip(dataset[cfg.data_field], kl_divs, all_mask_indices)])
 	
+	results = results.assign(**{
+		f: dataset[f] for f in dataset.features if not f in [cfg.data_field, 'input_ids', 'token_type_ids', 'attention_mask']
+	})
+	
 	results.to_csv('results.csv.gz', index=False, na_rep='NaN')
 	
-	summary = results.groupby([c for c in results.columns if not c in ['kl_div', 'sentence', 'target_indices']]) \
+	summary = results.groupby([c for c in results.columns if not c in ['kl_div', 'sentence', 'target_indices', *[f for f in dataset.features if not len(set(dataset[f])) == 1]]]) \
 		.agg(mean_kl_div = ('kl_div', 'mean'), sem_kl_div = ('kl_div', 'sem')) \
 		.reset_index()
 	

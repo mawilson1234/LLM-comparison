@@ -8,6 +8,7 @@ dataset_loc: dataset_maker/datasets/miniboki-2022-04-01_22-58-30/miniboki
 split: test
 data_field: text
 n_examples: none
+batch_size: 1
 
 kl_masking: none
 size_average: none

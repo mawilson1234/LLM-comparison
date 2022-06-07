@@ -19,7 +19,7 @@ def combine_summaries() -> None:
 	combined.q_model = [re.sub('-step_([0-9]{3})k', '-step_0\\1k', m) for m in combined.q_model]
 	combined.q_model = [m.replace('-step', '').replace('k', '') for m in combined.q_model]
 	
-	combined = combined.sort_values('p_model', kind='stable')
+	combined = combined.sort_values(['p_model', 'q_model'], kind='stable')
 	
 	combined.to_csv(os.path.join('outputs', 'summaries.csv.gz'), index=False)	
 

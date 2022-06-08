@@ -4,9 +4,9 @@ import pandas as pd
 
 from glob import glob
 
-def combine_summaries() -> None:
-	'''Combines all summary CSVs in outputs.'''
-	fs = [f for f in glob('outputs/**', recursive=True) if f.endswith('summary.csv.gz')]
+def combine_summaries(in_filename: str, out_filename: str) -> None:
+	'''Combines all CSVs with filename in_filename in outputs and output as out_filename.'''
+	fs = [f for f in glob('outputs/**', recursive=True) if os.path.split(f)[-1] == in_filename]
 	combined = pd.concat([pd.read_csv(f) for f in fs], ignore_index=True)
 	
 	for c in ['p_model', 'q_model']:
@@ -21,8 +21,8 @@ def combine_summaries() -> None:
 	
 	combined = combined.sort_values(['p_model', 'q_model'], kind='stable')
 	
-	combined.to_csv(os.path.join('outputs', 'summaries.csv.gz'), index=False)	
+	combined.to_csv(os.path.join('outputs', out_filename), index=False)	
 
 if __name__ == '__main__':
-
-	combine_summaries()
+	combine_summaries('summary.csv.gz', 'summaries.csv.gz')
+	combine_summaries('results.csv.gz', 'merged_results.csv.gz')

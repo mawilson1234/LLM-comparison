@@ -13,7 +13,7 @@ batch_size: 1
 kl_masking: none
 size_average: none
 reduce: none
-reduction: batchmean
+reduction: mean
 device: cpu
 
 hydra:

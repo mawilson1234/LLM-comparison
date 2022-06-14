@@ -1,12 +1,13 @@
 import re
 import os
+import sys
 import pandas as pd
 
 from glob import glob
 
-def combine_summaries(in_filename: str, out_filename: str) -> None:
+def combine_summaries(d: str, in_filename: str, out_filename: str) -> None:
 	'''Combines all CSVs with filename in_filename in outputs and output as out_filename.'''
-	fs = [f for f in glob('outputs/**', recursive=True) if os.path.split(f)[-1] == in_filename]
+	fs = [f for f in glob(os.path.join('outputs', d, '**'), recursive=True) if os.path.split(f)[-1] == in_filename]
 	combined = pd.concat([pd.read_csv(f) for f in fs], ignore_index=True)
 	
 	for c in ['p_model', 'q_model']:
@@ -24,5 +25,8 @@ def combine_summaries(in_filename: str, out_filename: str) -> None:
 	combined.to_csv(os.path.join('outputs', out_filename), index=False)	
 
 if __name__ == '__main__':
-	combine_summaries('summary.csv.gz', 'summaries.csv.gz')
-	combine_summaries('results.csv.gz', 'merged_results.csv.gz')
+	if sys.argv[-1] != 'combine_summaries.py':
+		d = sys.argv[-1]
+	
+	combine_summaries(d, 'summary.csv.gz', 'summaries.csv.gz')
+	combine_summaries(d, 'results.csv.gz', 'merged_results.csv.gz')

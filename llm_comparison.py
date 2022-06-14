@@ -272,7 +272,9 @@ def mask_input(
 		return_indices = True
 		# exclude the pad tokens
 		candidates 	= (inputs != tokenizer.convert_tokens_to_ids(tokenizer.pad_token)).nonzero(as_tuple=True)[0]
-		indices 	= torch.argsort(torch.rand(candidates.shape[0], device=device))[:round(candidates.shape[0]*.15)]
+		# pick the max of 15% and 1 to ensure that every input has at least one masked position.
+		# we don't always want to do this, but we do in this case so we have something to evaluate for every sentence
+		indices 	= torch.argsort(torch.rand(candidates.shape[0], device=device))[:max(round(candidates.shape[0]*.15),1)]
 		# this is just for presentational purposes really
 		indices 	= indices.sort().values
 	
@@ -523,7 +525,9 @@ def generate_mask_indices(
 	mask_indices = []
 	for sentence in tqdm(dataset[data_field]):
 		inputs = tokenizer(sentence, return_tensors='pt')['input_ids'][0]
-		mask_indices.append(mask_input(inputs=inputs, tokenizer=tokenizer, masking_style=masking_style)[-1].tolist())
+		indices = mask_input(inputs=inputs, tokenizer=tokenizer, masking_style=masking_style)[-1].tolist()
+		
+		mask_indices.append(indices)
 	
 	with open('saved_indices.json', 'wt') as out_file:
 		json.dump(mask_indices, out_file, indent=4)
@@ -540,7 +544,6 @@ def main(cfg: DictConfig):
 	print(OmegaConf.to_yaml(cfg))
 	
 	p = OmegaConf.load(os.path.join(hydra.utils.get_original_cwd(), 'models', f'{cfg.p_model}.yaml'))
-	q = OmegaConf.load(os.path.join(hydra.utils.get_original_cwd(), 'models', f'{cfg.q_model}.yaml'))
 	
 	dataset = load_format_dataset(
 		dataset_loc=os.path.join(hydra.utils.get_original_cwd(), cfg.dataset_loc),
@@ -554,6 +557,8 @@ def main(cfg: DictConfig):
 	if 'generate_mask_indices' in cfg and cfg.generate_mask_indices:
 		generate_mask_indices(p.string_id, dataset, cfg.data_field, p.tokenizer_kwargs, cfg.kl_masking)
 		return
+	
+	q = OmegaConf.load(os.path.join(hydra.utils.get_original_cwd(), 'models', f'{cfg.q_model}.yaml'))
 	
 	# need to pass specific masked indices to this for reproduceability
 	comp = ModelDistributionComparison(

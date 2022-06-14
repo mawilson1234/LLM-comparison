@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=combine_kl-divergence
+#SBATCH --job-name=combine_llm-comparison
 #SBATCH --output=joblogs/%x_%j.txt
 #SBATCH --time=02:00:00
 #SBATCH --mem=32G
@@ -8,6 +8,6 @@
 
 module load miniconda
 
-source activate kl-divergence
+source activate llm-comparison
 
-python combine_summaries.py
+python combine_summaries.py amask

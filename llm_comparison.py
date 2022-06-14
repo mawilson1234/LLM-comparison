@@ -371,6 +371,7 @@ class ModelDistributionComparison():
 		q_model_kwargs: Dict = None,
 		p_tokenizer_kwargs: Dict = None,
 		q_tokenizer_kwargs: Dict = None,
+		kl_reg: str = 'mean',
 		device: str = 'cpu',
 	) -> None:
 		'''
@@ -432,6 +433,11 @@ class ModelDistributionComparison():
 			raise ValueError(f'{len(self.saved_indices)} saved indices were found for {self.dataset.num_rows} examples!')
 			
 		self.dataloader 	= tqdm(torch.utils.data.DataLoader(self.dataset, batch_size=batch_size, collate_fn=pad_batch))
+		
+		if not kl_reg in ['mean', 'sum']:
+			raise ValueError(f'kl_reg must be one of "mean", "sum"; got {kl_reg}!')
+		
+		self.kl_reg 		= kl_reg
 	
 	def run(self) -> Tuple[torch.Tensor]:
 		'''
@@ -492,7 +498,9 @@ class ModelDistributionComparison():
 					# we just calculate the D_KL on the selected tokens (pad tokens are excluded in the mask indices returned by mask input, so we don't have to manually exclude those here)
 					q_output_res 	= torch.unsqueeze(F.log_softmax(torch.cat([q_output.index_select(0, mask_locations) for i, mask_locations in enumerate(ex_mask_indices)], dim=0), dim=-1), dim=0)
 					p_output_res 	= torch.unsqueeze(F.softmax(torch.cat([p_output.index_select(0, mask_locations) for i, mask_locations in enumerate(ex_mask_indices)], dim=0), dim=-1), dim=0)
-					kl_divs.append(float(F.kl_div(q_output_res, p_output_res, reduction='batchmean')))
+					
+					kl_div = float(F.kl_div(q_output_res, p_output_res, reduction='batchmean'))
+					kl_divs.append(kl_div/p_output_res.shape[1] if self.kl_reg == 'mean' else kl_div)
 					
 					# add mean entropy across masked positions
 					p_mean_entropies.append(np.mean([Categorical(probs=torch.softmax(p_output[mask_location], dim=-1)).entropy() for mask_location in ex_mask_indices]))
@@ -572,6 +580,7 @@ def main(cfg: DictConfig):
 		q_model_kwargs=q.model_kwargs,
 		p_tokenizer_kwargs=p.tokenizer_kwargs,
 		q_tokenizer_kwargs=q.tokenizer_kwargs,
+		kl_reg=cfg.kl_reg,
 		device=cfg.device if torch.cuda.is_available() else 'cpu'		
 	)
 	
@@ -586,12 +595,15 @@ def main(cfg: DictConfig):
 		split=cfg.split,
 		n_examples=cfg.n_examples,
 		kl_masking=cfg.kl_masking,
+		kl_reg=cfg.kl_reg,
 		saved_indices=cfg.saved_indices,
 		run_id=os.path.split(os.getcwd())[1]
 	)
 	
 	results = results.assign(**{
-		f: dataset[f] for f in dataset.features if not f in [cfg.data_field, 'input_ids', 'token_type_ids', 'attention_mask']
+		f: dataset[f] 
+		for f in dataset.features 
+			if not f in [cfg.data_field, 'input_ids', 'token_type_ids', 'attention_mask']
 	})
 	
 	results.to_csv('results.csv.gz', index=False, na_rep='NaN')

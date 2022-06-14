@@ -11,12 +11,13 @@ n_examples: none
 batch_size: 1
 
 kl_masking: always
+kl_reg: mean
 saved_indices: none
 device: cpu
 
 hydra:
   run: 
-    dir: outputs/${masking:${kl_masking}}/${p_model}-${q_model}/${now:%Y-%m-%d_%H-%M-%S.%f}
+    dir: outputs/${masking:${kl_masking}}-klreg${kl_reg}/${p_model}-${q_model}/${now:%Y-%m-%d_%H-%M-%S.%f}
   sweep:
     dir: outputs
-    subdir: /${masking:${kl_masking}}/${p_model}-${q_model}/${now:%Y-%m-%d_%H-%M-%S.%f}
+    subdir: /${masking:${kl_masking}}-klreg${kl_reg}/${p_model}-${q_model}/${now:%Y-%m-%d_%H-%M-%S.%f}

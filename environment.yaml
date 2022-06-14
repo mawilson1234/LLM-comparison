@@ -1,4 +1,4 @@
-name: kl-divergence
+name: llm-comparison
 
 dependencies:
   - python >=3.8,<=3.9.7

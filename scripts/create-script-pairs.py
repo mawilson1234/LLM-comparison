@@ -20,11 +20,11 @@ def generate_scripts(d: str = '.') -> None:
 	pairs 	= permutations(configs,2)
 	
 	# we don't want to use the intermediate multiberts as baseline models, 
-	# as they're not good stand-ins for the true distribution
-	pairs 	= [pair for pair in pairs if not pair[0].endswith('k')]
+	# as they're not good stand-ins for the true distribution, except to compare the 0 points to each other
+	pairs 	= [pair for pair in pairs if (pair[0].endswith('0000k') and pair[1].endswith('0000k')) or (not pair[0].endswith('k'))]
 	
 	# we only want to compare the intermediate multiberts to their corresponding final state as a baseline
-	pairs	= [pair for pair in pairs if not pair[1].endswith('k') or re.sub(r'-(.*)k$', '', pair[1]) == pair[0]]
+	pairs	= [pair for pair in pairs if (pair[0].endswith('0000k') and pair[1].endswith('0000k')) or (not pair[1].endswith('k') or re.sub(r'-(.*)k$', '', pair[1]) == pair[0])]
 	
 	# we don't need to use the redundant final checkpoint of the multibert models, since they're the same as the baseline version
 	pairs 	= [pair for pair in pairs if not pair[1].endswith('2000k')]
@@ -32,7 +32,7 @@ def generate_scripts(d: str = '.') -> None:
 	header 	= '\n'.join((
 		'#!/bin/bash',
 		'',
-		'#SBATCH --job-name=kl-comparison',
+		'#SBATCH --job-name=llm-comparison',
 		'#SBATCH --output=joblogs/%x_%j.txt',
 		'#SBATCH --nodes=1',
 		'#SBATCH --cpus-per-task=1',
@@ -46,16 +46,22 @@ def generate_scripts(d: str = '.') -> None:
 		'module load cuDNN',
 		'module load miniconda',
 		'',
-		'source activate kl-divergence',
+		'source activate llm-divergence',
 		'',
 	))
 	
 	for p_model, q_model in pairs:
-		file = header + (
-			f'\npython kl_comparison.py p_model={p_model} q_model={q_model} batch_size=32'
-		)
+		file = header + '\n' + ' \\\n\t'.join((
+			'python llm_comparison.py',
+			f'p_model={p_model}',
+			f'q_model={q_model}',
+			'batch_size=32',
+			'kl_masking=always',
+			'saved_indices=saved_amask_indices.json',
+			'device=gpu'
+		))
 		
-		with open(os.path.join(d, f'{p_model}-{q_model}.sh'), 'wt') as out_file:
+		with open(os.path.join(d, f'{p_model.replace("-", "_").replace("k", "")}-{q_model.replace("-", "_").replace("k", "")}.sh'), 'wt') as out_file:
 			out_file.write(file)
 
 if __name__ == '__main__':

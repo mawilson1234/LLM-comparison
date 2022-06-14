@@ -46,7 +46,7 @@ def generate_scripts(d: str = '.') -> None:
 		'module load cuDNN',
 		'module load miniconda',
 		'',
-		'source activate llm-divergence',
+		'source activate llm-comparison',
 		'',
 	))
 	

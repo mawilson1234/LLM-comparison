@@ -56,7 +56,7 @@ def generate_scripts(d: str = '.') -> None:
 			f'p_model={p_model}',
 			f'q_model={q_model}',
 			'batch_size=32',
-			'kl_masking=always',
+			'masking=always',
 			'saved_indices=saved_amask_indices.json',
 			'device=gpu'
 		))

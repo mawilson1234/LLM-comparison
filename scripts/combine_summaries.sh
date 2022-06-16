@@ -10,4 +10,4 @@ module load miniconda
 
 source activate llm-comparison
 
-python combine_summaries.py amask
+python combine_summaries.py amask-regmean

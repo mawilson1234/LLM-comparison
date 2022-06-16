@@ -14,12 +14,12 @@ module load CUDA
 module load cuDNN
 module load miniconda
 
-source activate llm-divergence
+source activate llm-comparison
 
 python llm_comparison.py \
 	p_model=multiberts_00 \
 	q_model=multiberts_00-0400k \
 	batch_size=32 \
-	kl_masking=always \
+	masking=always \
 	saved_indices=saved_amask_indices.json \
 	device=gpu

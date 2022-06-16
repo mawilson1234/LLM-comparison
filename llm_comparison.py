@@ -32,10 +32,7 @@ dataset_utils_logging.set_verbosity_error()
 
 log = logging.getLogger(__name__)
 
-OmegaConf.register_new_resolver(
-	'masking',
-	lambda kl_masking: f'{kl_masking[0]}mask' if not os.path.isfile(kl_masking) else f'{os.path.split(kl_masking)[-1].split(".")[0]}-filemask'
-)
+OmegaConf.register_new_resolver('masking', lambda masking: f'{masking[0]}mask')
 
 def apply_to_all_of_type(
 	data: 'any', 
@@ -272,9 +269,15 @@ def mask_input(
 		return_indices = True
 		# exclude the pad tokens
 		candidates 	= (inputs != tokenizer.convert_tokens_to_ids(tokenizer.pad_token)).nonzero(as_tuple=True)[0]
+		
 		# pick the max of 15% and 1 to ensure that every input has at least one masked position.
 		# we don't always want to do this, but we do in this case so we have something to evaluate for every sentence
-		indices 	= torch.argsort(torch.rand(candidates.shape[0], device=device))[:max(round(candidates.shape[0]*.15),1)]
+		indices 	= torch.argsort(torch.rand(candidates.shape[0], device=device))
+		
+		# exclude the bos and eos tokens
+		indices 	= torch.tensor([i for i in indices if not i == 0 and not i == max(indices)], device=device)
+		indices 	= indices[:max(round(indices.shape[0]*.15),1)]
+		
 		# this is just for presentational purposes really
 		indices 	= indices.sort().values
 	
@@ -371,7 +374,7 @@ class ModelDistributionComparison():
 		q_model_kwargs: Dict = None,
 		p_tokenizer_kwargs: Dict = None,
 		q_tokenizer_kwargs: Dict = None,
-		kl_reg: str = 'mean',
+		regularization: str = 'mean',
 		device: str = 'cpu',
 	) -> None:
 		'''
@@ -434,10 +437,10 @@ class ModelDistributionComparison():
 			
 		self.dataloader 	= tqdm(torch.utils.data.DataLoader(self.dataset, batch_size=batch_size, collate_fn=pad_batch))
 		
-		if not kl_reg in ['mean', 'sum']:
-			raise ValueError(f'kl_reg must be one of "mean", "sum"; got {kl_reg}!')
+		if not regularization in ['mean', 'sum']:
+			raise ValueError(f'regularization must be one of "mean", "sum"; got {regularization}!')
 		
-		self.kl_reg 		= kl_reg
+		self.reg = {'mean': np.mean, 'sum': np.sum}[regularization]
 	
 	def run(self) -> Tuple[torch.Tensor]:
 		'''
@@ -451,11 +454,14 @@ class ModelDistributionComparison():
 		kl_divs 			= []
 		all_mask_indices	= [] if self.saved_indices is None else self.saved_indices
 		p_mean_entropies 	= []
+		p_mean_log_probs	= []
 		q_mean_entropies 	= []
+		q_mean_log_probs	= []
 		
 		with torch.no_grad():
 			for i, batch in enumerate(self.dataloader):
 				batch_inputs	= {k: v.to(self.device) for k, v in batch.items() if isinstance(v,torch.Tensor)}
+				batch_inputs['labels'] = batch_inputs['input_ids'].clone().detach()
 				if self.saved_indices is not None:
 					mask_indices = self.saved_indices[(i*self.batch_size):min(((i+1)*self.batch_size),len(self.saved_indices))]
 					for i, sentence_mask_indices in enumerate(mask_indices):
@@ -478,7 +484,7 @@ class ModelDistributionComparison():
 									)
 						
 						mask_indices.append(mask_input_indices)
-				
+					
 					all_mask_indices.extend(mask_indices)
 				
 				if 'distilbert' not in self.q_model.name_or_path:
@@ -493,30 +499,36 @@ class ModelDistributionComparison():
 				
 				# we calculate D_KL for each example individually because we'd like to record the D_KL per sentence for inspection later
 				# doing it per batch would just give us a mean rather than the sum
-				for q_output, p_output, ex_mask_indices in zip(q_outputs, p_outputs, mask_indices):
+				for q_output, p_output, ex_mask_indices, labels in zip(q_outputs, p_outputs, mask_indices, batch_inputs['labels']):
 					
-					# we just calculate the D_KL on the selected tokens (pad tokens are excluded in the mask indices returned by mask input, so we don't have to manually exclude those here)
-					q_output_res 	= torch.unsqueeze(F.log_softmax(torch.cat([q_output.index_select(0, mask_locations) for i, mask_locations in enumerate(ex_mask_indices)], dim=0), dim=-1), dim=0)
-					p_output_res 	= torch.unsqueeze(F.softmax(torch.cat([p_output.index_select(0, mask_locations) for i, mask_locations in enumerate(ex_mask_indices)], dim=0), dim=-1), dim=0)
+					# we just calculate the numbers on the selected tokens (pad tokens are excluded in the mask indices returned by mask input, so we don't have to manually exclude those here)
+					q_output_targets 	= torch.cat([q_output.index_select(0, mask_location) for mask_location in ex_mask_indices], dim=0)
+					p_output_targets 	= torch.cat([p_output.index_select(0, mask_location) for mask_location in ex_mask_indices], dim=0)
+					labels_targets 		= torch.cat([labels.index_select(0, mask_location) for mask_location in ex_mask_indices], dim=0)
 					
-					kl_div = float(F.kl_div(q_output_res, p_output_res, reduction='batchmean'))
-					kl_divs.append(kl_div/p_output_res.shape[1] if self.kl_reg == 'mean' else kl_div)
+					q_output_logprob 	= F.log_softmax(q_output_targets, dim=-1)
+					q_output_prob 		= F.softmax(q_output_targets, dim=-1)
+					p_output_logprob 	= F.log_softmax(p_output_targets, dim=-1)
+					p_output_prob		= F.softmax(p_output_targets, dim=-1)
 					
-					# add mean entropy across masked positions
-					p_mean_entropies.append(np.mean([Categorical(probs=torch.softmax(p_output[mask_location], dim=-1)).entropy() for mask_location in ex_mask_indices]))
-					q_mean_entropies.append(np.mean([Categorical(probs=torch.softmax(q_output[mask_location], dim=-1)).entropy() for mask_location in ex_mask_indices]))
-				
-				self.dataloader.set_postfix(
-					p_ent_mean=f'{np.mean(p_mean_entropies):.2f}', 
-					q_ent_mean=f'{np.mean(q_mean_entropies):.2f}', 
-					kl_div_mean=f'{np.mean(kl_divs):.2f}',
-				)
+					# kl divergence across masked positions
+					kl_divs.append(self.reg([F.kl_div(torch.unsqueeze(q_id, dim=0), torch.unsqueeze(p_id, dim=0), reduction='batchmean') for q_id, p_id in zip(q_output_logprob, p_output_prob)]))
+					
+					# average log probability of correct choices
+					p_mean_log_probs.append(self.reg([p_id[label_id] for p_id, label_id in zip(p_output_logprob, labels_targets)]))
+					q_mean_log_probs.append(self.reg([q_id[label_id] for q_id, label_id in zip(q_output_logprob, labels_targets)]))
+					
+					# mean entropy across masked positions
+					p_mean_entropies.append(self.reg([Categorical(probs=p_id).entropy() for p_id in p_output_prob]))
+					q_mean_entropies.append(self.reg([Categorical(probs=q_id).entropy() for q_id in q_output_prob]))
 		
 		return {
-			'kl_div': kl_divs,
-			'target_indices': [indices.tolist() for indices in all_mask_indices],
-			'p_mean_targets_entropy': p_mean_entropies,
-			'q_mean_targets_entropy': q_mean_entropies,
+			'kl_div'					: kl_divs,
+			'target_indices'			: [indices.tolist() for indices in all_mask_indices],
+			'p_mean_targets_entropy'	: p_mean_entropies,
+			'q_mean_targets_entropy'	: q_mean_entropies,
+			'p_mean_targets_log_probs'	: p_mean_log_probs,
+			'q_mean_targets_log_probs'	: q_mean_log_probs
 		}
 
 def generate_mask_indices(
@@ -563,7 +575,7 @@ def main(cfg: DictConfig):
 	)
 	
 	if 'generate_mask_indices' in cfg and cfg.generate_mask_indices:
-		generate_mask_indices(p.string_id, dataset, cfg.data_field, p.tokenizer_kwargs, cfg.kl_masking)
+		generate_mask_indices(p.string_id, dataset, cfg.data_field, p.tokenizer_kwargs, cfg.masking)
 		return
 	
 	q = OmegaConf.load(os.path.join(hydra.utils.get_original_cwd(), 'models', f'{cfg.q_model}.yaml'))
@@ -574,13 +586,13 @@ def main(cfg: DictConfig):
 		q_model=q.string_id,
 		dataset=dataset,
 		batch_size=cfg.batch_size,
-		masking=cfg.kl_masking,
+		masking=cfg.masking,
 		saved_indices=cfg.saved_indices if not cfg.saved_indices == 'none' else None,
 		p_model_kwargs=p.model_kwargs,
 		q_model_kwargs=q.model_kwargs,
 		p_tokenizer_kwargs=p.tokenizer_kwargs,
 		q_tokenizer_kwargs=q.tokenizer_kwargs,
-		kl_reg=cfg.kl_reg,
+		regularization=cfg.regularization,
 		device=cfg.device if torch.cuda.is_available() else 'cpu'		
 	)
 	
@@ -594,8 +606,8 @@ def main(cfg: DictConfig):
 		dataset=cfg.dataset_loc,
 		split=cfg.split,
 		n_examples=cfg.n_examples,
-		kl_masking=cfg.kl_masking,
-		kl_reg=cfg.kl_reg,
+		masking=cfg.masking,
+		regularization=cfg.regularization,
 		saved_indices=cfg.saved_indices,
 		run_id=os.path.split(os.getcwd())[1]
 	)
@@ -608,7 +620,18 @@ def main(cfg: DictConfig):
 	
 	results.to_csv('results.csv.gz', index=False, na_rep='NaN')
 	
-	summary = results.groupby([c for c in results.columns if not c in ['kl_div', 'p_mean_targets_entropy', 'q_mean_targets_entropy', 'sentence', 'target_indices', *[f for f in dataset.features if not len(set(dataset[f])) == 1]]]) \
+	summary = results.groupby(
+		[
+			c for c in results.columns 
+			if not c in [
+				'kl_div', 
+				'p_mean_targets_entropy', 
+				'q_mean_targets_entropy', 
+				'p_mean_targets_log_probs',
+				'q_mean_targets_log_probs',
+				'sentence', 'target_indices', 
+			*[f for f in dataset.features if not len(set(dataset[f])) == 1]]
+		]) \
 		.agg(
 			mean_kl_div = ('kl_div', 'mean'), 
 			sem_kl_div = ('kl_div', 'sem'),
@@ -616,20 +639,23 @@ def main(cfg: DictConfig):
 			sem_p_entropy = ('p_mean_targets_entropy', 'sem'),
 			mean_q_entropy = ('q_mean_targets_entropy', 'mean'),
 			sem_q_entropy = ('q_mean_targets_entropy', 'sem'),
+			mean_p_logprob = ('p_mean_targets_log_probs', 'mean'),
+			sem_p_logprob = ('p_mean_targets_log_probs', 'sem'),
+			mean_q_logprob = ('q_mean_targets_log_probs', 'mean'),
+			sem_q_logprob = ('q_mean_targets_log_probs', 'sem'),
 		) \
 		.reset_index()
 	
-	summary = summary[
-		['run_id', 'p_model', 'q_model', 'mean_kl_div', 'sem_kl_div', 'mean_p_entropy', 'sem_p_entropy', 'mean_q_entropy', 'sem_q_entropy'] + 
-		[c for c in summary.columns if not c in [
-			'run_id', 
-			'p_model', 
-			'q_model', 
-			'mean_kl_div', 'sem_kl_div', 
-			'mean_p_entropy', 'sem_p_entropy',
-			'mean_q_entropy', 'sem_q_entropy'
-		]]
+	first = [
+		'run_id', 'p_model', 'q_model', 
+		'mean_kl_div', 'sem_kl_div', 
+		'mean_p_entropy', 'sem_p_entropy', 
+		'mean_q_entropy', 'sem_q_entropy',
+		'mean_p_logprob', 'sem_p_logprob',
+		'mean_q_logprob', 'sem_q_logprob',
 	]
+	
+	summary = summary[first + [c for c in summary.columns if not c in first]]
 	
 	summary.to_csv('summary.csv.gz', index=False)
 

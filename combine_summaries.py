@@ -22,7 +22,7 @@ def combine_summaries(d: str, in_filename: str, out_filename: str) -> None:
 	
 	combined = combined.sort_values(['p_model', 'q_model'], kind='stable')
 	
-	combined.to_csv(os.path.join('outputs', out_filename), index=False)	
+	combined.to_csv(os.path.join('outputs', d, out_filename), index=False)	
 
 if __name__ == '__main__':
 	if sys.argv[-1] != 'combine_summaries.py':

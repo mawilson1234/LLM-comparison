@@ -27,12 +27,11 @@ def combine_summaries(d: str, in_filename: str, out_filename: str) -> None:
 	
 	combined.to_csv(os.path.join('outputs', d, out_filename), index=False)	
 
-def plot_summaries(f: str) -> None:
+def plot_summaries(d: str, f: str) -> None:
 	'''Plots results from summary file.'''
-	summary = pd.read_csv(f)
-	d = os.path.split(f)[-1]
+	summary = pd.read_csv(os.path.join(d, f))
 	
-	with PdfPages(os.path.join(d, 'plots.pdf')) as pdf:
+	with PdfPages(os.path.join('outputs', d, 'plots.pdf')) as pdf:
 		for name, expr, size, fmt in [('mean_kl_div', '_0[0-9]_', 3, '.2f'), ('mean_kl_div_zeros', '_0000', 8, '.4f')]:
 			if name == 'mean_kl_div':
 				kl_div_summary = summary[
@@ -209,8 +208,9 @@ def plot_summaries(f: str) -> None:
 				del fig
 	
 if __name__ == '__main__':
-	d = sys.argv[-1] if sys.argv[-1] != 'combine_summaries.py' else 'outputs'
+	if sys.argv[-1] != 'combine_summaries.py':
+		d = sys.argv[-1] if sys.argv[-1] != 'combine_summaries.py'
 	
 	combine_summaries(d, 'summary.csv.gz', 'summaries.csv.gz')
 	combine_summaries(d, 'results.csv.gz', 'merged_results.csv.gz')
-	plot_summaries(os.path.join(d, 'summaries.csv.gz'))
+	plot_summaries(d, 'summaries.csv.gz')

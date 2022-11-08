@@ -498,7 +498,6 @@ class ModelDistributionComparison():
 				else:
 					p_outputs 	= self.p_model(**{k: v for k, v in batch_inputs.items() if not k == 'token_type_ids'}).logits
 				
-				breakpoint()
 				q_outputs_logprob 	= F.log_softmax(q_outputs, dim=-1)
 				q_outputs_prob 		= F.softmax(q_outputs, dim=-1)
 				p_outputs_logprob 	= F.log_softmax(p_outputs, dim=-1)

@@ -451,8 +451,9 @@ class ModelDistributionComparison():
 			returns:
 				dict containing kl divergence, mean entropy for p and q models, and target indices for each example in self.dataset
 		'''
-		kl_divs 			= []
 		all_mask_indices	= [] if self.saved_indices is None else self.saved_indices
+		
+		kl_divs 			= []
 		p_mean_entropies 	= []
 		p_mean_log_probs	= []
 		q_mean_entropies 	= []
@@ -497,26 +498,36 @@ class ModelDistributionComparison():
 				else:
 					p_outputs 	= self.p_model(**{k: v for k, v in batch_inputs.items() if not k == 'token_type_ids'}).logits
 				
+				q_outputs_logprob 	= F.log_softmax(q_outputs, dim=-1)
+				q_outputs_prob 		= F.softmax(q_outputs, dim=-1)
+				p_outputs_logprob 	= F.log_softmax(p_outputs, dim=-1)
+				p_outputs_prob 		= F.softmax(p_outputs, dim=-1)
+				
+				q_outputs_logprob 	= [torch.cat([q_output_logprob.index_select(0, mask_location) for mask_location in ex_mask_indices], dim=0) for q_output_logprob, ex_mask_indices in zip(q_outputs_logprob, mask_indices)]
+				q_outputs_prob 		= [torch.cat([q_output_prob.index_select(0, mask_location) for mask_location in ex_mask_indices], dim=0) for q_output_prob, ex_mask_indices in zip(q_outputs_prob, mask_indices)]
+				p_outputs_logprob 	= [torch.cat([p_output_logprob.index_select(0, mask_location) for mask_location in ex_mask_indices], dim=0) for p_output_logprob, ex_mask_indices in zip(p_outputs_logprob, mask_indices)]
+				p_outputs_prob 		= [torch.cat([p_output_prob.index_select(0, mask_location) for mask_location in ex_mask_indices], dim=0) for p_output_prob, ex_mask_indices in zip(p_outputs_prob, mask_indices)]
+				labels_targets 		= [torch.cat([labels.index_select(0, mask_location) for mask_location in ex_mask_indices], dim=0) for labels, ex_mask_indices in zip(batch_inputs['labels'], mask_indices)]
+				
+				outputs 			= zip(q_outputs_logprob, q_outputs_prob, p_outputs_logprob, p_outputs_prob, mask_indices, labels_targets)
+				
 				# we calculate D_KL for each example individually because we'd like to record the D_KL per sentence for inspection later
 				# doing it per batch would just give us a mean rather than the sum
-				for q_output, p_output, ex_mask_indices, labels in zip(q_outputs, p_outputs, mask_indices, batch_inputs['labels']):
+				for q_output_logprob, q_output_prob, p_output_logprob, p_output_prob, ex_mask_indices, labels in outputs:
 					
 					# we just calculate the numbers on the selected tokens (pad tokens are excluded in the mask indices returned by mask input, so we don't have to manually exclude those here)
-					q_output_targets 	= torch.cat([q_output.index_select(0, mask_location) for mask_location in ex_mask_indices], dim=0)
-					p_output_targets 	= torch.cat([p_output.index_select(0, mask_location) for mask_location in ex_mask_indices], dim=0)
-					labels_targets 		= torch.cat([labels.index_select(0, mask_location) for mask_location in ex_mask_indices], dim=0)
-					
-					q_output_logprob 	= F.log_softmax(q_output_targets, dim=-1)
-					q_output_prob 		= F.softmax(q_output_targets, dim=-1)
-					p_output_logprob 	= F.log_softmax(p_output_targets, dim=-1)
-					p_output_prob		= F.softmax(p_output_targets, dim=-1)
+					# q_output_logprob 	= torch.cat([q_output_logprob.index_select(0, mask_location) for mask_location in ex_mask_indices], dim=0)
+					# q_output_prob 		= torch.cat([q_output_prob.index_select(0, mask_location) for mask_location in ex_mask_indices], dim=0)
+					# p_output_logprob 	= torch.cat([p_output_logprob.index_select(0, mask_location) for mask_location in ex_mask_indices], dim=0) 
+					# p_output_prob 		= torch.cat([p_output_prob.index_select(0, mask_location) for mask_location in ex_mask_indices], dim=0)
+					# labels_targets 		= torch.cat([labels.index_select(0, mask_location) for mask_location in ex_mask_indices], dim=0)
 					
 					# kl divergence across masked positions
 					kl_divs.append(self.reg([F.kl_div(torch.unsqueeze(q_id, dim=0), torch.unsqueeze(p_id, dim=0), reduction='batchmean') for q_id, p_id in zip(q_output_logprob, p_output_prob)]))
 					
 					# average log probability of correct choices
-					p_mean_log_probs.append(self.reg([p_id[label_id] for p_id, label_id in zip(p_output_logprob, labels_targets)]))
-					q_mean_log_probs.append(self.reg([q_id[label_id] for q_id, label_id in zip(q_output_logprob, labels_targets)]))
+					p_mean_log_probs.append(self.reg([p_id[label_id] for p_id, label_id in zip(p_output_logprob, labels)]))
+					q_mean_log_probs.append(self.reg([q_id[label_id] for q_id, label_id in zip(q_output_logprob, labels)]))
 					
 					# mean entropy across masked positions
 					p_mean_entropies.append(self.reg([Categorical(probs=p_id).entropy() for p_id in p_output_prob]))

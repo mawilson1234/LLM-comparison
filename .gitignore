@@ -1,3 +1,6 @@
 /outputs/
 /joblogs/
 /__pycache__/
+scripts/backup.sh
+scripts/*.txt
+scripts/*/*.txt
